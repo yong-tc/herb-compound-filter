@@ -1,364 +1,383 @@
 # -*- coding: utf-8 -*-
 """
-中药化合物鉴定报告筛选工具 - Streamlit Web版 v1.0
-适用于所有药材的鉴定报告筛选
+中药化合物鉴定报告筛选工具 - 智能验证版
+四步验证流程：确证级 → 高置信级 → 推定级 → 排除提示级
+支持诊断离子文件上传验证
 """
 
 import streamlit as st
 import pandas as pd
-import os
+import re
 from datetime import datetime
-import glob
+from io import BytesIO
 
 st.set_page_config(
-    page_title="中药化合物鉴定报告筛选工具",
+    page_title="智能鉴定筛选",
     page_icon="🔬",
     layout="wide"
 )
 
-# 快速预设定义
-PRESETS = {
-    '1': ('高置信模式', '确证级+高置信级, ppm≤20, 有碎片'),
-    '2': ('中等置信', '推定级+, ppm≤50'),
-    '3': ('宽松模式', 'ppm≤100, 有碎片'),
-    '4': ('仅确证级', '确证级'),
-    '5': ('仅黄酮类', 'ppm≤30, 黄酮/黄酮醇/黄烷酮'),
-    '6': ('仅生物碱', 'ppm≤30, 生物碱'),
-    '7': ('仅萜类', 'ppm≤30, 萜/单萜/倍半萜/二萜/三萜'),
-    '8': ('仅酚酸类', 'ppm≤30, 酚酸/苯甲酸'),
-    '9': ('仅糖类', 'ppm≤30, 糖/糖苷/多糖'),
-    '10': ('确证+高置信无碎片', '高置信级, 无碎片'),
-    '11': ('高质量无碎片', 'ppm≤10, 无碎片'),
-    '12': ('综合评分高', '得分≥85'),
-    '13': ('低ppm精准匹配', 'ppm≤5, 有碎片'),
-    '14': ('中等碎片匹配', '碎片数3-10个'),
+# 诊断离子示例（常见化合物类别特征离子）
+DEFAULT_DIAGNOSTIC_IONS = {
+    '生物碱': ['91.05', '77.04', '65.04', '107.05', '121.06'],
+    '黄酮': ['153.02', '165.02', '271.06', '285.04', '286.05'],
+    '苯丙素': ['119.05', '137.06', '163.04', '145.03', '117.03'],
+    '萜类': ['95.05', '81.07', '109.07', '123.08', '137.13'],
+    '有机酸': ['59.01', '71.01', '87.01', '103.04', '129.02'],
+    '香豆素': ['145.03', '163.04', '189.05', '217.05', '247.06'],
+    '环烯醚萜': ['101.06', '113.06', '127.08', '155.07', '169.09'],
 }
 
-
 @st.cache_data
-def load_report(uploaded_file):
-    """加载上传的报告文件"""
+def load_report(file):
+    if file is None:
+        return None
     try:
-        if uploaded_file is not None:
-            if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file)
-            else:
-                xlsx = pd.ExcelFile(uploaded_file)
-                all_dfs = []
-                for sheet in xlsx.sheet_names:
-                    sheet_df = pd.read_excel(xlsx, sheet_name=sheet)
-                    sheet_df['_来源Sheet'] = sheet
-                    all_dfs.append(sheet_df)
-                df = pd.concat(all_dfs, ignore_index=True)
-            return df
+        if file.name.endswith('.csv'):
+            return pd.read_csv(file)
+        else:
+            xlsx = pd.ExcelFile(file)
+            dfs = []
+            for sheet in xlsx.sheet_names:
+                df = pd.read_excel(xlsx, sheet_name=sheet)
+                df['_来源'] = sheet
+                dfs.append(df)
+            return pd.concat(dfs, ignore_index=True)
     except Exception as e:
         st.error(f"加载失败: {e}")
         return None
-    return None
 
-
-def find_local_reports():
-    """查找本地报告文件"""
-    patterns = ['*鉴定报告*.xlsx', '*筛选结果*.xlsx', '*.xlsx']
-    found_files = []
-    for pattern in patterns:
-        files = glob.glob(pattern)
-        for f in files:
-            if not f.startswith('~') and f not in found_files:
-                found_files.append(f)
-    return sorted(found_files)
-
-
-def apply_preset(df, preset_key):
-    """应用快速预设"""
-    if df is None or preset_key not in PRESETS:
-        return df
-
-    if preset_key == '1':
-        return df[(df['评级名称'].isin(['确证级', '高置信级'])) & (df['ppm'] <= 20) & (df['匹配碎片数'] > 0)]
-    elif preset_key == '2':
-        return df[(df['评级名称'].isin(['确证级', '高置信级', '推定级'])) & (df['ppm'] <= 50)]
-    elif preset_key == '3':
-        return df[(df['ppm'] <= 100) & (df['匹配碎片数'] > 0)]
-    elif preset_key == '4':
-        return df[df['评级名称'] == '确证级']
-    elif preset_key == '5':
-        return df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('黄酮|黄酮醇|黄烷酮|flavonoid', na=False, case=False))]
-    elif preset_key == '6':
-        return df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('生物碱|alkaloid', na=False, case=False))]
-    elif preset_key == '7':
-        return df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('萜|单萜|倍半萜|二萜|三萜|terpene', na=False, case=False))]
-    elif preset_key == '8':
-        return df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('酚酸|苯甲酸|phenolic', na=False, case=False))]
-    elif preset_key == '9':
-        return df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('糖|糖苷|多糖|glucoside|sugar', na=False, case=False))]
-    elif preset_key == '10':
-        return df[(df['评级名称'].isin(['确证级', '高置信级'])) & (df['匹配碎片数'] == 0)]
-    elif preset_key == '11':
-        return df[(df['ppm'] <= 10) & (df['匹配碎片数'] == 0)]
-    elif preset_key == '12':
-        return df[df['综合得分'] >= 85]
-    elif preset_key == '13':
-        return df[(df['ppm'] <= 5) & (df['匹配碎片数'] > 0)]
-    elif preset_key == '14':
-        return df[(df['匹配碎片数'] >= 3) & (df['匹配碎片数'] <= 10)]
-    return df
-
-
-def apply_custom_filters(df, filters):
-    """应用自定义筛选条件"""
-    if df is None:
-        return df
-
-    filtered = df.copy()
-
-    if filters.get('levels'):
-        filtered = filtered[filtered['评级名称'].isin(filters['levels'])]
-
-    if filters.get('ppm_min') is not None:
-        filtered = filtered[filtered['ppm'] >= filters['ppm_min']]
-    if filters.get('ppm_max') is not None:
-        filtered = filtered[filtered['ppm'] <= filters['ppm_max']]
-
-    if filters.get('score_min') is not None:
-        filtered = filtered[filtered['综合得分'] >= filters['score_min']]
-
-    if filters.get('frag_min') is not None:
-        filtered = filtered[filtered['匹配碎片数'] >= filters['frag_min']]
-
-    if filters.get('has_fragment') == '有碎片':
-        filtered = filtered[filtered['匹配碎片数'] > 0]
-    elif filters.get('has_fragment') == '无碎片':
-        filtered = filtered[filtered['匹配碎片数'] == 0]
-
-    if filters.get('include_kw'):
-        for kw in filters['include_kw']:
-            filtered = filtered[filtered['化合物中文名'].str.contains(kw, na=False, case=False)]
-
-    if filters.get('exclude_kw'):
-        for kw in filters['exclude_kw']:
-            filtered = filtered[~filtered['化合物中文名'].str.contains(kw, na=False, case=False)]
-
-    if filters.get('formula'):
-        filtered = filtered[filtered['分子式'].str.contains(filters['formula'], na=False, case=False)]
-
-    if filters.get('mw_min') is not None:
-        filtered = filtered[filtered['匹配质量数'] >= filters['mw_min']]
-    if filters.get('mw_max') is not None:
-        filtered = filtered[filtered['匹配质量数'] <= filters['mw_max']]
-
-    return filtered
-
-
-def main():
-    st.title("🔬 中药化合物鉴定报告筛选工具")
-    st.markdown("**通用版 - 适用于所有药材的鉴定报告**")
-
-    if 'df_original' not in st.session_state:
-        st.session_state.df_original = None
-    if 'df_filtered' not in st.session_state:
-        st.session_state.df_filtered = None
-
-    # 侧边栏
-    with st.sidebar:
-        st.header("📁 加载报告")
-
-        uploaded_file = st.file_uploader(
-            "上传鉴定报告 (Excel/CSV)",
-            type=['xlsx', 'xls', 'csv']
-        )
-
-        if uploaded_file:
-            df = load_report(uploaded_file)
-            if df is not None:
-                st.session_state.df_original = df
-                st.session_state.df_filtered = df
-                st.success(f"已加载 {len(df)} 条记录")
-
-        st.divider()
-        st.markdown("**或选择本地文件:**")
-        local_files = find_local_reports()
-        if local_files:
-            selected_file = st.selectbox("本地报告", ["-- 选择 --"] + local_files)
-            if selected_file != "-- 选择 --":
-                try:
-                    xlsx = pd.ExcelFile(selected_file)
-                    all_dfs = []
-                    for sheet in xlsx.sheet_names:
-                        sheet_df = pd.read_excel(xlsx, sheet_name=sheet)
-                        sheet_df['_来源Sheet'] = sheet
-                        all_dfs.append(sheet_df)
-                    df = pd.concat(all_dfs, ignore_index=True)
-                    st.session_state.df_original = df
-                    st.session_state.df_filtered = df
-                    st.success(f"已加载 {len(df)} 条记录")
-                except Exception as e:
-                    st.error(f"加载失败: {e}")
-
-        if st.session_state.df_original is not None:
-            st.divider()
-            st.markdown(f"**原始数据:** {len(st.session_state.df_original)} 条")
-
-    # 主界面
-    tab1, tab2, tab3 = st.tabs(["⚡ 快速筛选", "🔧 自定义筛选", "📊 统计摘要"])
-
-    with tab1:
-        st.subheader("快速预设筛选")
-        cols = st.columns(2)
-        for i, (key, (name, desc)) in enumerate(PRESETS.items()):
-            with cols[i % 2]:
-                if st.button(f"{i+1}. {name}", use_container_width=True):
-                    if st.session_state.df_original is not None:
-                        st.session_state.df_filtered = apply_preset(
-                            st.session_state.df_original.copy(), key
-                        )
-                        st.rerun()
-
-        if st.session_state.df_filtered is not None:
-            st.divider()
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("筛选结果", len(st.session_state.df_filtered))
-            with col2:
-                pct = len(st.session_state.df_filtered) / len(st.session_state.df_original) * 100
-                st.metric("保留比例", f"{pct:.1f}%")
-            with col3:
-                if '匹配碎片数' in st.session_state.df_filtered.columns:
-                    has_frag = (st.session_state.df_filtered['匹配碎片数'] > 0).sum()
-                    st.metric("有碎片", has_frag)
-
-    with tab2:
-        st.subheader("自定义多条件筛选")
-        if st.session_state.df_original is not None:
-            with st.form("custom_filter"):
-                filters = {}
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    if '评级名称' in st.session_state.df_original.columns:
-                        levels = st.session_state.df_original['评级名称'].dropna().unique().tolist()
-                        selected_levels = st.multiselect("评级", levels, default=levels)
-                        filters['levels'] = selected_levels if selected_levels else None
-
-                    ppm_min, ppm_max = st.slider("ppm范围", 0, 100, (0, 100))
-                    filters['ppm_min'] = ppm_min if ppm_min > 0 else None
-                    filters['ppm_max'] = ppm_max if ppm_max < 100 else None
-
-                    score_min = st.number_input("最低得分", 0, 100, 0)
-                    filters['score_min'] = score_min if score_min > 0 else None
-
-                with col2:
-                    frag_min = st.number_input("最少碎片数", 0, 100, 0)
-                    filters['frag_min'] = frag_min if frag_min > 0 else None
-
-                    has_frag = st.radio("碎片状态", ["不限", "有碎片", "无碎片"], horizontal=True)
-                    filters['has_fragment'] = None if has_frag == "不限" else has_frag
-
-                    include_kw = st.text_input("包含关键词 (逗号分隔)")
-                    filters['include_kw'] = [k.strip() for k in include_kw.split(',') if k.strip()] if include_kw else None
-
-                    exclude_kw = st.text_input("排除关键词 (逗号分隔)")
-                    filters['exclude_kw'] = [k.strip() for k in exclude_kw.split(',') if k.strip()] if exclude_kw else None
-
-                submitted = st.form_submit_button("应用筛选", type="primary", use_container_width=True)
-                if submitted:
-                    st.session_state.df_filtered = apply_custom_filters(
-                        st.session_state.df_original.copy(), filters
-                    )
-                    st.rerun()
+def load_diagnostic_ions(file):
+    """加载诊断离子文件"""
+    try:
+        if file.name.endswith('.csv'):
+            df = pd.read_csv(file)
         else:
-            st.info("请先上传或选择报告文件")
+            df = pd.read_excel(file)
 
-    with tab3:
-        st.subheader("统计摘要")
-        if st.session_state.df_filtered is not None:
-            df = st.session_state.df_filtered
+        # 尝试识别列名
+        for col in df.columns:
+            col_lower = col.lower()
+            if '化合物' in col or '类别' in col or '类型' in col or 'class' in col_lower:
+                compound_col = col
+            if '离子' in col or 'fragment' in col_lower or 'mz' in col_lower:
+                ion_col = col
+
+        # 解析为字典
+        ions_dict = {}
+        for _, row in df.iterrows():
+            compound_type = str(row.get(compound_col, '')).strip()
+            ion_val = str(row.get(ion_col, '')).strip()
+            if compound_type and ion_val:
+                if compound_type not in ions_dict:
+                    ions_dict[compound_type] = []
+                ions_dict[compound_type].append(ion_val)
+
+        return ions_dict
+    except Exception as e:
+        st.error(f"诊断离子文件解析失败: {e}")
+        return {}
+
+def check_diagnostic_ions(row, ions_dict):
+    """检查诊断离子匹配情况"""
+    compound_type = str(row.get('化合物类型', ''))
+    all_fragments = str(row.get('所有碎片离子', '')) + ' ' + str(row.get('主要碎片离子', ''))
+
+    if compound_type in ions_dict:
+        matched = 0
+        for ion in ions_dict[compound_type]:
+            if ion in all_fragments:
+                matched += 1
+        return matched, len(ions_dict[compound_type])
+    return 0, 0
+
+def apply_four_step_filter(df, ions_dict=None, min_literature=1, min_frag_match=2):
+    """四步验证流程筛选 - 所有级别均需验证"""
+    if df is None:
+        return None
+
+    results = []
+
+    for _, row in df.iterrows():
+        level = row.get('评级名称', '')
+        literature_count = row.get('文献来源数', 1) or 1
+        frag_count = row.get('匹配碎片数', 0) or 0
+
+        # 诊断离子检查
+        diag_matched = 0
+        diag_total = 0
+        if ions_dict:
+            diag_matched, diag_total = check_diagnostic_ions(row, ions_dict)
+
+        if level == '确证级':
+            # 第一步：确证级也需要验证
+            # 诊断离子匹配且碎片数足够 → 高可信采纳
+            if diag_total > 0 and diag_matched >= 1 and frag_count >= min_frag_match:
+                results.append({
+                    **row.to_dict(),
+                    '验证结果': '采纳',
+                    '验证级别': '确证级-诊断离子确认',
+                    '诊断离子匹配': f'{diag_matched}/{diag_total}'
+                })
+            # 文献支持强 → 采纳
+            elif literature_count >= min_literature + 1:
+                results.append({
+                    **row.to_dict(),
+                    '验证结果': '采纳',
+                    '验证级别': '确证级-多文献支持',
+                    '诊断离子匹配': f'{diag_matched}/{diag_total}' if diag_total > 0 else 'N/A'
+                })
+            # 碎片数足够 → 采纳
+            elif frag_count >= min_frag_match * 2:
+                results.append({
+                    **row.to_dict(),
+                    '验证结果': '采纳',
+                    '验证级别': '确证级-碎片确认',
+                    '诊断离子匹配': f'{diag_matched}/{diag_total}' if diag_total > 0 else 'N/A'
+                })
+            else:
+                results.append({
+                    **row.to_dict(),
+                    '验证结果': '候选',
+                    '验证级别': '确证级-待核实',
+                    '诊断离子匹配': f'{diag_matched}/{diag_total}' if diag_total > 0 else '未验证'
+                })
+
+        elif level == '高置信级':
+            # 第二步：高置信级需诊断离子验证
+            if diag_total > 0 and diag_matched >= 1 and frag_count >= min_frag_match:
+                results.append({
+                    **row.to_dict(),
+                    '验证结果': '采纳',
+                    '验证级别': '高置信级-诊断离子确认',
+                    '诊断离子匹配': f'{diag_matched}/{diag_total}'
+                })
+            elif literature_count >= min_literature + 2:
+                results.append({
+                    **row.to_dict(),
+                    '验证结果': '采纳',
+                    '验证级别': '高置信级-多文献支持',
+                    '诊断离子匹配': f'{diag_matched}/{diag_total}' if diag_total > 0 else 'N/A'
+                })
+            else:
+                results.append({
+                    **row.to_dict(),
+                    '验证结果': '候选',
+                    '验证级别': '高置信级-待核实',
+                    '诊断离子匹配': f'{diag_matched}/{diag_total}' if diag_total > 0 else '未验证'
+                })
+
+        elif level == '推定级':
+            # 第三步：推定级需要文献支持且诊断离子确认
+            if literature_count >= min_literature and diag_matched >= 1:
+                results.append({
+                    **row.to_dict(),
+                    '验证结果': '采纳',
+                    '验证级别': '推定级-文献+诊断确认',
+                    '诊断离子匹配': f'{diag_matched}/{diag_total}' if diag_total > 0 else 'N/A'
+                })
+            elif literature_count >= min_literature + 2:
+                results.append({
+                    **row.to_dict(),
+                    '验证结果': '采纳',
+                    '验证级别': '推定级-多文献支持',
+                    '诊断离子匹配': f'{diag_matched}/{diag_total}' if diag_total > 0 else 'N/A'
+                })
+            else:
+                results.append({
+                    **row.to_dict(),
+                    '验证结果': '暂不录入',
+                    '验证级别': '推定级-证据不足',
+                    '诊断离子匹配': f'{diag_matched}/{diag_total}' if diag_total > 0 else '未验证'
+                })
+
+        # 提示级：直接排除，不加入结果
+
+    return pd.DataFrame(results)
+
+# 页面标题
+st.title("🔬 中药化合物鉴定 - 智能验证筛选")
+st.caption("四步验证流程 + 诊断离子验证")
+
+# 侧边栏设置
+with st.sidebar:
+    st.header("设置")
+
+    # 诊断离子上传
+    st.subheader("诊断离子文件")
+    ions_file = st.file_uploader("上传诊断离子(CSV/Excel)", type=['csv', 'xlsx', 'xls'])
+
+    if ions_file:
+        custom_ions = load_diagnostic_ions(ions_file)
+        st.success(f"已加载 {len(custom_ions)} 个类别")
+    else:
+        custom_ions = DEFAULT_DIAGNOSTIC_IONS
+        st.info(f"使用默认离子库 ({len(custom_ions)} 个类别)")
+
+    # 诊断离子库预览
+    with st.expander("诊断离子库"):
+        for compound_type, ions in custom_ions.items():
+            st.text(f"{compound_type}: {', '.join(ions[:3])}...")
+
+    # 文献来源数设置
+    st.subheader("验证阈值设置")
+    min_literature = st.slider("最低文献数", 1, 5, 2)
+    min_frag_match = st.slider("最低碎片数", 1, 20, 4)
+
+# 文件上传
+uploaded_file = st.file_uploader("上传鉴定报告 (Excel/CSV)", type=['xlsx', 'xls', 'csv'])
+
+df_original = load_report(uploaded_file)
+
+if df_original is not None:
+    st.success(f"已加载 {len(df_original)} 条记录")
+
+    # 原始数据统计
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("原始记录", len(df_original))
+    with col2:
+        confirmed = (df_original['评级名称'] == '确证级').sum()
+        st.metric("确证级", confirmed)
+    with col3:
+        high = (df_original['评级名称'] == '高置信级').sum()
+        st.metric("高置信级", high)
+    with col4:
+        probable = (df_original['评级名称'] == '推定级').sum()
+        st.metric("推定级", probable)
+
+    st.divider()
+
+    # 四步验证筛选
+    st.subheader("四步验证筛选")
+
+    if st.button("▶ 启动四步验证", type="primary", use_container_width=True):
+        with st.spinner("执行验证中..."):
+            df_result = apply_four_step_filter(df_original, custom_ions, min_literature, min_frag_match)
+            st.session_state.filtered = df_result
+
+        if df_result is not None:
+            st.success("验证完成!")
+
+            # 验证结果统计
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("筛选结果", len(df))
+                adopt = (df_result['验证结果'] == '采纳').sum()
+                st.metric("采纳", adopt)
             with col2:
-                if '综合得分' in df.columns:
-                    st.metric("平均得分", f"{df['综合得分'].mean():.1f}")
+                candidate = (df_result['验证结果'] == '候选').sum()
+                st.metric("候选", candidate)
             with col3:
-                if 'ppm' in df.columns:
-                    st.metric("平均ppm", f"{df['ppm'].mean():.1f}")
+                pending = (df_result['验证结果'] == '暂不录入').sum()
+                st.metric("暂不录入", pending)
             with col4:
-                if '匹配碎片数' in df.columns:
-                    st.metric("有碎片", (df['匹配碎片数'] > 0).sum())
+                st.metric("总计", len(df_result))
 
-            st.divider()
-            if '评级名称' in df.columns:
-                st.markdown("### 评级分布")
-                st.bar_chart(df['评级名称'].value_counts())
+    # 获取筛选结果
+    if 'filtered' not in st.session_state or st.session_state.filtered is None:
+        st.session_state.filtered = None
 
-            if '化合物类型' in df.columns:
-                st.markdown("### 化合物类型 (Top 10)")
-                st.bar_chart(df['化合物类型'].value_counts().head(10))
-        else:
-            st.info("请先加载报告文件")
+    df = st.session_state.filtered
 
-    # 结果表格和下载
-    if st.session_state.df_filtered is not None:
+    if df is not None and len(df) > 0:
         st.divider()
-        st.subheader("📋 筛选结果")
 
-        display_cols = st.multiselect(
-            "显示列",
-            list(st.session_state.df_filtered.columns),
-            default=['序号', '化合物中文名', '分子式', 'ppm', '综合得分', '评级名称', '匹配碎片数']
-        )
+        # 验证级别分布
+        st.subheader("验证结果分布")
 
-        if display_cols:
-            sort_col = st.selectbox("排序", ["无排序"] + display_cols)
-            sort_asc = st.checkbox("升序")
+        level_dist = df['验证级别'].value_counts()
+        col1, col2 = st.columns(2)
 
-            df_display = st.session_state.df_filtered[display_cols].copy()
-            if sort_col != "无排序" and sort_col in df_display.columns:
-                df_display = df_display.sort_values(sort_col, ascending=sort_asc)
+        with col1:
+            st.bar_chart(level_dist)
 
-            st.dataframe(df_display, use_container_width=True, height=400)
+        with col2:
+            st.dataframe(
+                level_dist.reset_index().rename(columns={'index': '验证级别', '验证级别': '数量'}),
+                use_container_width=True
+            )
 
-            col1, col2 = st.columns(2)
-            with col1:
-                from io import BytesIO
-                output = BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    with_frag = df_display[df_display['匹配碎片数'] > 0] if '匹配碎片数' in df_display.columns else pd.DataFrame()
-                    no_frag = df_display[df_display['匹配碎片数'] == 0] if '匹配碎片数' in df_display.columns else pd.DataFrame()
-                    if not with_frag.empty:
-                        with_frag.to_excel(writer, sheet_name='有碎片匹配', index=False)
-                    if not no_frag.empty:
-                        no_frag.to_excel(writer, sheet_name='无碎片匹配', index=False)
-                    elif with_frag.empty:
-                        df_display.to_excel(writer, sheet_name='筛选结果', index=False)
+        st.divider()
 
-                st.download_button(
-                    "📥 下载完整报告 (Excel)",
-                    output.getvalue(),
-                    f"筛选结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+        # 筛选结果表格
+        st.subheader(f"筛选结果: {len(df)} 条")
 
-            with col2:
-                summary_cols = ['序号', '化合物中文名', '分子式', '匹配质量数', 'ppm', '综合得分', '评级名称', '匹配碎片数']
-                available_summary = [c for c in summary_cols if c in df_display.columns]
-                summary_df = df_display[available_summary]
-                output_summary = BytesIO()
-                summary_df.to_excel(output_summary, index=False, engine='openpyxl')
+        display_cols = ['序号', '化合物中文名', '评级名称', '验证结果', '验证级别',
+                       '文献来源数', '综合得分', '匹配碎片数']
+        available = [c for c in display_cols if c in df.columns]
 
-                st.download_button(
-                    "📥 下载精简摘要",
-                    output_summary.getvalue(),
-                    f"摘要报告_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+        df_show = df[available].sort_values(['验证结果', '综合得分'],
+                                             ascending=[True, False])
+        st.dataframe(df_show, use_container_width=True, height=400)
 
-        if st.button("🔄 重置筛选", type="secondary"):
-            st.session_state.df_filtered = st.session_state.df_original
+        # 详细查看
+        with st.expander("查看完整列信息"):
+            st.dataframe(df, use_container_width=True)
+
+        st.divider()
+
+        # 下载功能
+        col1, col2 = st.columns(2)
+
+        with col1:
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, sheet_name='验证结果', index=False)
+            st.download_button(
+                "📥 下载Excel",
+                output.getvalue(),
+                f"验证结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+        with col2:
+            csv = df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                "📥 下载CSV",
+                csv,
+                f"验证结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+        # 重置
+        if st.button("重置", type="secondary"):
+            st.session_state.filtered = None
             st.rerun()
 
+else:
+    st.info("请上传鉴定报告文件 (Excel或CSV格式)")
 
-if __name__ == "__main__":
-    main()
+    # 四步验证说明
+    st.divider()
+    st.subheader("四步验证流程")
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown("""
+        **第一步：确证级**
+        🔍 诊断离子+碎片验证
+        多重确认才采纳
+        """)
+    with col2:
+        st.markdown("""
+        **第二步：高置信级**
+        🔍 诊断离子验证
+        有匹配则采纳
+        """)
+    with col3:
+        st.markdown("""
+        **第三步：推定级**
+        📚 需文献支持
+        多文献+诊断离子
+        """)
+    with col4:
+        st.markdown("""
+        **第四步：提示级**
+        ❌ 直接排除
+        不进入报告
+        """)
+
+    st.divider()
+    st.caption("支持自定义诊断离子文件上传 | 四步验证流程")
