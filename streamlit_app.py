@@ -1,728 +1,363 @@
 # -*- coding: utf-8 -*-
 """
-中药化合物鉴定报告筛选工具 v3.0 (通用版)
-支持多条件组合筛选、智能排序、批量导出
-适用于所有药材的鉴定报告
+中药化合物鉴定报告筛选工具 - Streamlit Web版 v1.0
+适用于所有药材的鉴定报告筛选
 """
 
+import streamlit as st
 import pandas as pd
 import os
-import re
 from datetime import datetime
 import glob
 
+st.set_page_config(
+    page_title="中药化合物鉴定报告筛选工具",
+    page_icon="🔬",
+    layout="wide"
+)
 
-def load_report(report_path):
-    """加载鉴定报告"""
-    if not os.path.exists(report_path):
-        print(f"文件不存在: {report_path}")
-        return None
+# 快速预设定义
+PRESETS = {
+    '1': ('高置信模式', '确证级+高置信级, ppm≤20, 有碎片'),
+    '2': ('中等置信', '推定级+, ppm≤50'),
+    '3': ('宽松模式', 'ppm≤100, 有碎片'),
+    '4': ('仅确证级', '确证级'),
+    '5': ('仅黄酮类', 'ppm≤30, 黄酮/黄酮醇/黄烷酮'),
+    '6': ('仅生物碱', 'ppm≤30, 生物碱'),
+    '7': ('仅萜类', 'ppm≤30, 萜/单萜/倍半萜/二萜/三萜'),
+    '8': ('仅酚酸类', 'ppm≤30, 酚酸/苯甲酸'),
+    '9': ('仅糖类', 'ppm≤30, 糖/糖苷/多糖'),
+    '10': ('确证+高置信无碎片', '高置信级, 无碎片'),
+    '11': ('高质量无碎片', 'ppm≤10, 无碎片'),
+    '12': ('综合评分高', '得分≥85'),
+    '13': ('低ppm精准匹配', 'ppm≤5, 有碎片'),
+    '14': ('中等碎片匹配', '碎片数3-10个'),
+}
 
+
+@st.cache_data
+def load_report(uploaded_file):
+    """加载上传的报告文件"""
     try:
-        xlsx = pd.ExcelFile(report_path)
-        print(f"发现 {len(xlsx.sheet_names)} 个工作表: {xlsx.sheet_names}")
-
-        all_dfs = []
-        for sheet in xlsx.sheet_names:
-            df = pd.read_excel(xlsx, sheet_name=sheet)
-            df['_来源Sheet'] = sheet
-            all_dfs.append(df)
-
-        combined_df = pd.concat(all_dfs, ignore_index=True)
-        print(f"共加载 {len(combined_df)} 条记录")
-
-        # 分析数据来源
-        if '药材名称' in combined_df.columns:
-            herbs = combined_df['药材名称'].dropna().unique()
-            print(f"数据来源药材: {list(herbs)[:5]}{'...' if len(herbs) > 5 else ''}")
-
-        return combined_df
+        if uploaded_file is not None:
+            if uploaded_file.name.endswith('.csv'):
+                df = pd.read_csv(uploaded_file)
+            else:
+                xlsx = pd.ExcelFile(uploaded_file)
+                all_dfs = []
+                for sheet in xlsx.sheet_names:
+                    sheet_df = pd.read_excel(xlsx, sheet_name=sheet)
+                    sheet_df['_来源Sheet'] = sheet
+                    all_dfs.append(sheet_df)
+                df = pd.concat(all_dfs, ignore_index=True)
+            return df
     except Exception as e:
-        print(f"加载失败: {e}")
+        st.error(f"加载失败: {e}")
         return None
+    return None
 
 
-def find_report_files():
-    """自动查找当前目录的报告文件"""
-    # 查找所有xlsx文件
-    patterns = ['*鉴定报告*.xlsx', '*全库*鉴定*.xlsx', '*筛选结果*.xlsx', '*.xlsx']
+def find_local_reports():
+    """查找本地报告文件"""
+    patterns = ['*鉴定报告*.xlsx', '*筛选结果*.xlsx', '*.xlsx']
     found_files = []
-
     for pattern in patterns:
         files = glob.glob(pattern)
         for f in files:
             if not f.startswith('~') and f not in found_files:
                 found_files.append(f)
-
     return sorted(found_files)
 
 
-def quick_filter_presets(df):
-    """快速筛选预设"""
-    print("\n" + "="*60)
-    print("快速筛选预设")
-    print("="*60)
-    presets = {
-        '1': ('高置信模式', '确证级+高置信级, ppm≤20, 有碎片'),
-        '2': ('中等置信', '推定级+, ppm≤50'),
-        '3': ('宽松模式', 'ppm≤100, 有碎片'),
-        '4': ('仅确证级', '确证级'),
-        '5': ('仅黄酮类', 'ppm≤30, 黄酮/黄酮醇/黄烷酮'),
-        '6': ('仅生物碱', 'ppm≤30, 生物碱'),
-        '7': ('仅萜类', 'ppm≤30, 萜/单萜/倍半萜/二萜/三萜'),
-        '8': ('仅酚酸类', 'ppm≤30, 酚酸/苯甲酸'),
-        '9': ('仅糖类', 'ppm≤30, 糖/糖苷/多糖'),
-        '10': ('确证+高置信无碎片', '高置信级, 无碎片'),
-        '11': ('高质量无碎片', 'ppm≤10, 无碎片'),
-        '12': ('综合评分高', '得分≥85'),
-        '13': ('低ppm精准匹配', 'ppm≤5, 有碎片'),
-        '14': ('中等碎片匹配', '碎片数3-10个'),
-    }
+def apply_preset(df, preset_key):
+    """应用快速预设"""
+    if df is None or preset_key not in PRESETS:
+        return df
 
-    for num, (name, desc) in presets.items():
-        print(f" {num:2s}. {name}")
-        print(f"     {desc}")
-    print("  0. 返回手动筛选")
-
-    choice = input("\n选择预设 (0-14): ").strip()
-
-    if choice == '1':
-        filtered = df[(df['评级名称'].isin(['确证级', '高置信级'])) & (df['ppm'] <= 20) & (df['匹配碎片数'] > 0)].copy()
-    elif choice == '2':
-        filtered = df[(df['评级名称'].isin(['确证级', '高置信级', '推定级'])) & (df['ppm'] <= 50)].copy()
-    elif choice == '3':
-        filtered = df[(df['ppm'] <= 100) & (df['匹配碎片数'] > 0)].copy()
-    elif choice == '4':
-        filtered = df[df['评级名称'] == '确证级'].copy()
-    elif choice == '5':
-        filtered = df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('黄酮|黄酮醇|黄烷酮|flavonoid', na=False, case=False))].copy()
-    elif choice == '6':
-        filtered = df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('生物碱|alkaloid', na=False, case=False))].copy()
-    elif choice == '7':
-        filtered = df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('萜|单萜|倍半萜|二萜|三萜|terpene', na=False, case=False))].copy()
-    elif choice == '8':
-        filtered = df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('酚酸|苯甲酸|phenolic', na=False, case=False))].copy()
-    elif choice == '9':
-        filtered = df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('糖|糖苷|多糖|glucoside|sugar', na=False, case=False))].copy()
-    elif choice == '10':
-        filtered = df[(df['评级名称'].isin(['确证级', '高置信级'])) & (df['匹配碎片数'] == 0)].copy()
-    elif choice == '11':
-        filtered = df[(df['ppm'] <= 10) & (df['匹配碎片数'] == 0)].copy()
-    elif choice == '12':
-        filtered = df[df['综合得分'] >= 85].copy()
-    elif choice == '13':
-        filtered = df[(df['ppm'] <= 5) & (df['匹配碎片数'] > 0)].copy()
-    elif choice == '14':
-        filtered = df[(df['匹配碎片数'] >= 3) & (df['匹配碎片数'] <= 10)].copy()
-    else:
-        return None
-
-    if choice in presets:
-        print(f"\n应用: {presets[choice][0]}")
-    return filtered
+    if preset_key == '1':
+        return df[(df['评级名称'].isin(['确证级', '高置信级'])) & (df['ppm'] <= 20) & (df['匹配碎片数'] > 0)]
+    elif preset_key == '2':
+        return df[(df['评级名称'].isin(['确证级', '高置信级', '推定级'])) & (df['ppm'] <= 50)]
+    elif preset_key == '3':
+        return df[(df['ppm'] <= 100) & (df['匹配碎片数'] > 0)]
+    elif preset_key == '4':
+        return df[df['评级名称'] == '确证级']
+    elif preset_key == '5':
+        return df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('黄酮|黄酮醇|黄烷酮|flavonoid', na=False, case=False))]
+    elif preset_key == '6':
+        return df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('生物碱|alkaloid', na=False, case=False))]
+    elif preset_key == '7':
+        return df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('萜|单萜|倍半萜|二萜|三萜|terpene', na=False, case=False))]
+    elif preset_key == '8':
+        return df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('酚酸|苯甲酸|phenolic', na=False, case=False))]
+    elif preset_key == '9':
+        return df[(df['ppm'] <= 30) & (df['化合物中文名'].str.contains('糖|糖苷|多糖|glucoside|sugar', na=False, case=False))]
+    elif preset_key == '10':
+        return df[(df['评级名称'].isin(['确证级', '高置信级'])) & (df['匹配碎片数'] == 0)]
+    elif preset_key == '11':
+        return df[(df['ppm'] <= 10) & (df['匹配碎片数'] == 0)]
+    elif preset_key == '12':
+        return df[df['综合得分'] >= 85]
+    elif preset_key == '13':
+        return df[(df['ppm'] <= 5) & (df['匹配碎片数'] > 0)]
+    elif preset_key == '14':
+        return df[(df['匹配碎片数'] >= 3) & (df['匹配碎片数'] <= 10)]
+    return df
 
 
-def create_filter_conditions(df):
-    """创建筛选条件字典"""
-    conditions = {}
-
-    print("\n" + "="*60)
-    print("多条件组合筛选器")
-    print("="*60)
-
-    # 1. 评级筛选
-    if '评级名称' in df.columns:
-        levels = df['评级名称'].dropna().unique().tolist()
-        levels.sort()
-        print("\n【1】评级筛选 (多选用逗号分隔，直接回车跳过):")
-        print(f"   可选: {levels}")
-        levels_input = input("   选择评级: ").strip()
-        if levels_input:
-            selected = [l.strip() for l in levels_input.split(',')]
-            conditions['评级名称'] = selected
-
-    # 2. ppm范围筛选
-    if 'ppm' in df.columns:
-        print("\n【2】ppm范围筛选 (直接回车跳过):")
-        min_ppm = input("   最小ppm (如5): ").strip()
-        max_ppm = input("   最大ppm (如50): ").strip()
-        if min_ppm or max_ppm:
-            conditions['ppm范围'] = (
-                float(min_ppm) if min_ppm else -float('inf'),
-                float(max_ppm) if max_ppm else float('inf')
-            )
-
-    # 3. 综合得分筛选
-    if '综合得分' in df.columns:
-        print("\n【3】综合得分筛选 (直接回车跳过):")
-        min_score = input("   最低得分 (如70): ").strip()
-        max_score = input("   最高得分 (如100): ").strip()
-        if min_score or max_score:
-            conditions['得分范围'] = (
-                float(min_score) if min_score else 0,
-                float(max_score) if max_score else 100
-            )
-
-    # 4. 匹配碎片数筛选
-    if '匹配碎片数' in df.columns:
-        print("\n【4】匹配碎片数筛选:")
-        min_frags = input("   最少碎片数: ").strip()
-        max_frags = input("   最多碎片数: ").strip()
-        if min_frags or max_frags:
-            conditions['碎片数范围'] = (
-                int(min_frags) if min_frags else 0,
-                int(max_frags) if max_frags else 999
-            )
-        print("   5. 仅显示有碎片")
-        print("   6. 仅显示无碎片")
-        frag_opt = input("   选择 (5/6跳过): ").strip()
-        if frag_opt == '5':
-            conditions['has_fragment'] = True
-        elif frag_opt == '6':
-            conditions['has_fragment'] = False
-
-    # 5. 化合物名称关键词筛选
-    print("\n【5】化合物名称关键词筛选:")
-    include_kw = input("   包含关键词 (如: 苷、黄酮): ").strip()
-    exclude_kw = input("   排除关键词 (如: 酸、酯): ").strip()
-    if include_kw:
-        conditions['包含关键词'] = [k.strip() for k in include_kw.split(',')]
-    if exclude_kw:
-        conditions['排除关键词'] = [k.strip() for k in exclude_kw.split(',')]
-
-    # 6. 分子式筛选
-    print("\n【6】分子式筛选:")
-    formula_pattern = input("   包含元素 (如: C6H8O): ").strip()
-    if formula_pattern:
-        conditions['分子式包含'] = formula_pattern
-
-    # 7. 化合物类型筛选
-    if '化合物类型' in df.columns:
-        types = df['化合物类型'].dropna().unique().tolist()
-        types = [t for t in types if str(t) != 'nan']
-        types.sort()
-        print("\n【7】化合物类型筛选 (直接回车跳过):")
-        for i, t in enumerate(types[:20], 1):
-            print(f"   {i:2d}. {t}")
-        type_input = input(f"   选择类型编号 (1-{min(20,len(types))}): ").strip()
-        if type_input:
-            try:
-                idx = int(type_input) - 1
-                if 0 <= idx < len(types):
-                    conditions['化合物类型'] = types[idx]
-            except:
-                conditions['化合物类型'] = type_input
-
-    # 8. 分子量范围筛选
-    if '匹配质量数' in df.columns:
-        print("\n【8】分子量范围筛选:")
-        min_mw = input("   最小分子量 (如100): ").strip()
-        max_mw = input("   最大分子量 (如1000): ").strip()
-        if min_mw or max_mw:
-            conditions['分子量范围'] = (
-                float(min_mw) if min_mw else 0,
-                float(max_mw) if max_mw else 100000
-            )
-
-    # 9. RT保留时间筛选
-    if '可能出峰时间' in df.columns:
-        print("\n【9】保留时间范围筛选:")
-        print("   提示: 可能出峰时间格式为逗号分隔的时间点")
-        min_rt = input("   最早时间(分钟, 如5): ").strip()
-        max_rt = input("   最晚时间(分钟, 如30): ").strip()
-        if min_rt or max_rt:
-            conditions['RT范围'] = (
-                float(min_rt) if min_rt else 0,
-                float(max_rt) if max_rt else 999
-            )
-
-    # 10. 数据库来源筛选
-    if '数据来源' in df.columns:
-        sources = df['数据来源'].dropna().unique().tolist()
-        sources.sort()
-        print("\n【10】数据库来源筛选 (直接回车跳过):")
-        print(f"   可选: {sources}")
-        source = input("   选择来源: ").strip()
-        if source:
-            conditions['数据来源'] = source
-
-    # 11. 母离子m/z筛选
-    print("\n【11】母离子m/z筛选:")
-    min_mz = input("   最小m/z (如100): ").strip()
-    max_mz = input("   最大m/z (如1000): ").strip()
-    if min_mz or max_mz:
-        conditions['m/z范围'] = (
-            float(min_mz) if min_mz else 0,
-            float(max_mz) if max_mz else 100000
-        )
-
-    # 12. 药材名称筛选（通用）
-    if '药材名称' in df.columns:
-        print("\n【12】药材名称筛选 (直接回车跳过):")
-        herb = input("   输入药材名关键词: ").strip()
-        if herb:
-            conditions['药材名称'] = herb
-
-    return conditions
-
-
-def apply_filters(df, conditions):
-    """应用筛选条件"""
-    if df is None or df.empty:
+def apply_custom_filters(df, filters):
+    """应用自定义筛选条件"""
+    if df is None:
         return df
 
     filtered = df.copy()
-    total_before = len(filtered)
 
-    print("\n" + "-"*60)
-    print("筛选过程:")
-    print("-"*60)
+    if filters.get('levels'):
+        filtered = filtered[filtered['评级名称'].isin(filters['levels'])]
 
-    # 评级筛选
-    if '评级名称' in conditions:
-        levels = conditions['评级名称']
-        filtered = filtered[filtered['评级名称'].isin(levels)]
-        print(f"  评级筛选 ({levels}): {len(filtered)} 条")
+    if filters.get('ppm_min') is not None:
+        filtered = filtered[filtered['ppm'] >= filters['ppm_min']]
+    if filters.get('ppm_max') is not None:
+        filtered = filtered[filtered['ppm'] <= filters['ppm_max']]
 
-    # ppm范围筛选
-    if 'ppm范围' in conditions:
-        min_ppm, max_ppm = conditions['ppm范围']
-        filtered = filtered[(filtered['ppm'] >= min_ppm) & (filtered['ppm'] <= max_ppm)]
-        print(f"  ppm范围筛选 ({min_ppm}-{max_ppm}): {len(filtered)} 条")
+    if filters.get('score_min') is not None:
+        filtered = filtered[filtered['综合得分'] >= filters['score_min']]
 
-    # 得分范围筛选
-    if '得分范围' in conditions:
-        min_score, max_score = conditions['得分范围']
-        filtered = filtered[(filtered['综合得分'] >= min_score) & (filtered['综合得分'] <= max_score)]
-        print(f"  得分范围筛选 ({min_score}-{max_score}): {len(filtered)} 条")
+    if filters.get('frag_min') is not None:
+        filtered = filtered[filtered['匹配碎片数'] >= filters['frag_min']]
 
-    # 碎片数范围筛选
-    if '碎片数范围' in conditions:
-        min_f, max_f = conditions['碎片数范围']
-        filtered = filtered[(filtered['匹配碎片数'] >= min_f) & (filtered['匹配碎片数'] <= max_f)]
-        print(f"  碎片数筛选 ({min_f}-{max_f}): {len(filtered)} 条")
+    if filters.get('has_fragment') == '有碎片':
+        filtered = filtered[filtered['匹配碎片数'] > 0]
+    elif filters.get('has_fragment') == '无碎片':
+        filtered = filtered[filtered['匹配碎片数'] == 0]
 
-    # 有无碎片筛选
-    if 'has_fragment' in conditions:
-        if conditions['has_fragment']:
-            filtered = filtered[filtered['匹配碎片数'] > 0]
-        else:
-            filtered = filtered[filtered['匹配碎片数'] == 0]
-        print(f"  碎片状态: {'有碎片' if conditions['has_fragment'] else '无碎片'}: {len(filtered)} 条")
+    if filters.get('include_kw'):
+        for kw in filters['include_kw']:
+            filtered = filtered[filtered['化合物中文名'].str.contains(kw, na=False, case=False)]
 
-    # 包含关键词筛选
-    if '包含关键词' in conditions:
-        for kw in conditions['包含关键词']:
-            cn_col = '化合物中文名' if '化合物中文名' in filtered.columns else None
-            en_col = '化合物英文名' if '化合物英文名' in filtered.columns else None
+    if filters.get('exclude_kw'):
+        for kw in filters['exclude_kw']:
+            filtered = filtered[~filtered['化合物中文名'].str.contains(kw, na=False, case=False)]
 
-            if cn_col and en_col:
-                mask = filtered[cn_col].str.contains(kw, na=False, case=False) | filtered[en_col].str.contains(kw, na=False, case=False)
-            elif cn_col:
-                mask = filtered[cn_col].str.contains(kw, na=False, case=False)
-            else:
-                mask = pd.Series([False] * len(filtered))
-            filtered = filtered[mask]
-        print(f"  包含关键词{conditions['包含关键词']}: {len(filtered)} 条")
+    if filters.get('formula'):
+        filtered = filtered[filtered['分子式'].str.contains(filters['formula'], na=False, case=False)]
 
-    # 排除关键词筛选
-    if '排除关键词' in conditions:
-        for kw in conditions['排除关键词']:
-            cn_col = '化合物中文名' if '化合物中文名' in filtered.columns else None
-            en_col = '化合物英文名' if '化合物英文名' in filtered.columns else None
-
-            if cn_col and en_col:
-                mask = ~filtered[cn_col].str.contains(kw, na=False, case=False) & ~filtered[en_col].str.contains(kw, na=False, case=False)
-            elif cn_col:
-                mask = ~filtered[cn_col].str.contains(kw, na=False, case=False)
-            else:
-                mask = pd.Series([True] * len(filtered))
-            filtered = filtered[mask]
-        print(f"  排除关键词{conditions['排除关键词']}: {len(filtered)} 条")
-
-    # 分子式筛选
-    if '分子式包含' in conditions:
-        pattern = conditions['分子式包含']
-        if '分子式' in filtered.columns:
-            filtered = filtered[filtered['分子式'].str.contains(pattern, na=False, case=False)]
-            print(f"  分子式包含'{pattern}': {len(filtered)} 条")
-
-    # 化合物类型筛选
-    if '化合物类型' in conditions:
-        compound_type = conditions['化合物类型']
-        filtered = filtered[filtered['化合物类型'].str.contains(compound_type, na=False, case=False)]
-        print(f"  类型包含'{compound_type}': {len(filtered)} 条")
-
-    # 分子量范围筛选
-    if '分子量范围' in conditions:
-        min_mw, max_mw = conditions['分子量范围']
-        if '匹配质量数' in filtered.columns:
-            filtered = filtered[(filtered['匹配质量数'] >= min_mw) & (filtered['匹配质量数'] <= max_mw)]
-            print(f"  分子量范围 ({min_mw}-{max_mw}): {len(filtered)} 条")
-
-    # RT范围筛选
-    if 'RT范围' in conditions:
-        min_rt, max_rt = conditions['RT范围']
-        def in_rt_range(rt_str):
-            if pd.isna(rt_str):
-                return False
-            try:
-                rts = [float(r.strip()) for r in str(rt_str).split(',')]
-                return any(min_rt <= r <= max_rt for r in rts)
-            except:
-                return False
-        if '可能出峰时间' in filtered.columns:
-            filtered = filtered[filtered['可能出峰时间'].apply(in_rt_range)]
-            print(f"  RT范围 ({min_rt}-{max_rt}min): {len(filtered)} 条")
-
-    # 数据来源筛选
-    if '数据来源' in conditions:
-        source = conditions['数据来源']
-        filtered = filtered[filtered['数据来源'] == source]
-        print(f"  来源='{source}': {len(filtered)} 条")
-
-    # m/z范围筛选
-    if 'm/z范围' in conditions:
-        min_mz, max_mz = conditions['m/z范围']
-        def extract_first_mz(frag_str):
-            if pd.isna(frag_str):
-                return None
-            try:
-                parts = str(frag_str).split(',')
-                if parts:
-                    mz = float(parts[0].strip())
-                    return mz
-            except:
-                pass
-            return None
-        if '一级碎片' in filtered.columns:
-            filtered['_tmp_mz'] = filtered['一级碎片'].apply(extract_first_mz)
-            filtered = filtered[(filtered['_tmp_mz'] >= min_mz) & (filtered['_tmp_mz'] <= max_mz)]
-            filtered = filtered.drop('_tmp_mz', axis=1)
-            print(f"  m/z范围 ({min_mz}-{max_mz}): {len(filtered)} 条")
-
-    # 药材名称筛选
-    if '药材名称' in conditions:
-        herb = conditions['药材名称']
-        if '药材名称' in filtered.columns:
-            filtered = filtered[filtered['药材名称'].str.contains(herb, na=False, case=False)]
-            print(f"  药材包含'{herb}': {len(filtered)} 条")
-
-    print("-"*60)
-    print(f"总计: {total_before} → {len(filtered)} 条 (过滤 {total_before - len(filtered)} 条)")
+    if filters.get('mw_min') is not None:
+        filtered = filtered[filtered['匹配质量数'] >= filters['mw_min']]
+    if filters.get('mw_max') is not None:
+        filtered = filtered[filtered['匹配质量数'] <= filters['mw_max']]
 
     return filtered
 
 
-def print_filter_summary(df, original_count=0):
-    """打印筛选结果摘要"""
-    if df is None or df.empty:
-        return
-
-    print("\n" + "="*60)
-    print("筛选结果摘要")
-    print("="*60)
-
-    print(f"\n共筛选出 {len(df)} 个化合物")
-    if original_count > 0:
-        pct = len(df) / original_count * 100
-        print(f"占原始数据的 {pct:.1f}%")
-
-    # 评级分布
-    if '评级名称' in df.columns:
-        print("\n【评级分布】")
-        for level, count in df['评级名称'].value_counts().items():
-            pct = count / len(df) * 100
-            bar = '█' * int(pct / 5)
-            print(f"  {level:10s}: {count:5d} ({pct:5.1f}%) {bar}")
-
-    # 碎片匹配分布
-    if '匹配碎片数' in df.columns:
-        has_frag = (df['匹配碎片数'] > 0).sum()
-        no_frag = (df['匹配碎片数'] == 0).sum()
-        print(f"\n【碎片匹配】")
-        print(f"  有碎片: {has_frag} ({has_frag/len(df)*100:.1f}%)")
-        print(f"  无碎片: {no_frag} ({no_frag/len(df)*100:.1f}%)")
-
-    # 得分统计
-    if '综合得分' in df.columns:
-        print(f"\n【综合得分】")
-        print(f"  最高: {df['综合得分'].max():.1f}")
-        print(f"  平均: {df['综合得分'].mean():.1f}")
-        print(f"  中位数: {df['综合得分'].median():.1f}")
-
-    # ppm统计
-    if 'ppm' in df.columns:
-        print(f"\n【ppm误差分布】")
-        bins = [0, 5, 10, 20, 30, 50, 100, 999]
-        labels = ['0-5', '5-10', '10-20', '20-30', '30-50', '50-100', '>100']
-        df['_ppm_bin'] = pd.cut(df['ppm'], bins=bins, labels=labels)
-        for label in labels:
-            count = (df['_ppm_bin'] == label).sum()
-            pct = count / len(df) * 100
-            bar = '█' * int(pct / 5)
-            print(f"  {label:>8s}: {count:5d} ({pct:5.1f}%) {bar}")
-        df.drop('_ppm_bin', axis=1, inplace=True)
-
-    # 化合物类型分布
-    if '化合物类型' in df.columns:
-        types = df['化合物类型'].value_counts().head(10)
-        print(f"\n【化合物类型 (Top 10)】")
-        for t, count in types.items():
-            print(f"  {t}: {count}")
-
-    # 分子量分布
-    if '匹配质量数' in df.columns:
-        print(f"\n【分子量统计】")
-        print(f"  范围: {df['匹配质量数'].min():.1f} - {df['匹配质量数'].max():.1f}")
-        print(f"  平均: {df['匹配质量数'].mean():.1f}")
-
-    # 药材分布
-    if '药材名称' in df.columns:
-        herbs = df['药材名称'].value_counts().head(5)
-        print(f"\n【药材分布 (Top 5)】")
-        for h, count in herbs.items():
-            print(f"  {h}: {count}")
-
-
-def display_top_results(df, n=20):
-    """显示前N条结果"""
-    if df is None or df.empty:
-        return
-
-    print("\n" + "="*60)
-    print(f"前 {min(n, len(df))} 条结果预览 (按综合得分排序):")
-    print("="*60)
-
-    # 选择关键列显示
-    display_cols = []
-    for col in ['序号', '化合物中文名', '分子式', 'ppm', '综合得分', '评级名称', '匹配碎片数', '化合物类型']:
-        if col in df.columns:
-            display_cols.append(col)
-
-    if display_cols:
-        if '综合得分' in df.columns:
-            display_df = df.sort_values('综合得分', ascending=False).head(n)
-        else:
-            display_df = df.head(n)
-
-        pd.set_option('display.max_columns', None)
-        pd.set_option('display.width', None)
-        pd.set_option('display.max_colwidth', 30)
-        print(display_df[display_cols].to_string(index=False))
-        pd.reset_option('display.max_columns')
-        pd.reset_option('display.width')
-        pd.reset_option('display.max_colwidth')
-
-
-def sort_results(df):
-    """排序结果"""
-    if df is None or df.empty:
-        return df
-
-    print("\n排序方式:")
-    print(" 1. 综合得分 (高→低)")
-    print(" 2. ppm误差 (低→高)")
-    print(" 3. 匹配碎片数 (多→少)")
-    print(" 4. 分子量 (小→大)")
-    print(" 5. 分子量 (大→小)")
-    print(" 6. 评级 (确证→提示)")
-    print(" 0. 保持原序")
-
-    choice = input("\n选择排序方式: ").strip()
-
-    if choice == '1':
-        return df.sort_values('综合得分', ascending=False) if '综合得分' in df.columns else df
-    elif choice == '2':
-        return df.sort_values('ppm', ascending=True) if 'ppm' in df.columns else df
-    elif choice == '3':
-        return df.sort_values('匹配碎片数', ascending=False) if '匹配碎片数' in df.columns else df
-    elif choice == '4':
-        return df.sort_values('匹配质量数', ascending=True) if '匹配质量数' in df.columns else df
-    elif choice == '5':
-        return df.sort_values('匹配质量数', ascending=False) if '匹配质量数' in df.columns else df
-    elif choice == '6':
-        level_order = {'确证级': 1, '高置信级': 2, '推定级': 3, '提示级': 4}
-        if '评级名称' in df.columns:
-            df['_sort_level'] = df['评级名称'].map(level_order).fillna(99)
-            df = df.sort_values('_sort_level')
-            df.drop('_sort_level', axis=1, inplace=True)
-        return df
-    else:
-        return df
-
-
-def save_filtered_report(df, output_path=None):
-    """保存筛选后的报告"""
-    if df is None or df.empty:
-        print("没有数据可保存")
-        return None
-
-    if output_path is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = f"筛选结果_{timestamp}.xlsx"
-
-    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        if '匹配碎片数' in df.columns:
-            with_frag = df[df['匹配碎片数'] > 0].copy()
-            no_frag = df[df['匹配碎片数'] == 0].copy()
-
-            if not with_frag.empty:
-                with_frag.to_excel(writer, sheet_name='有碎片匹配', index=False)
-                print(f"  有碎片匹配: {len(with_frag)} 条")
-            if not no_frag.empty:
-                no_frag.to_excel(writer, sheet_name='无碎片匹配', index=False)
-                print(f"  无碎片匹配: {len(no_frag)} 条")
-        else:
-            df.to_excel(writer, sheet_name='筛选结果', index=False)
-
-    print(f"\n报告已保存: {output_path}")
-    return output_path
-
-
-def export_summary_report(df, output_path=None):
-    """导出精简摘要报告"""
-    if df is None or df.empty:
-        return None
-
-    if output_path is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = f"摘要报告_{timestamp}.xlsx"
-
-    summary_cols = ['序号', '化合物中文名', '分子式', '匹配质量数', 'ppm',
-                    '综合得分', '评级名称', '匹配碎片数', '化合物类型']
-    available_cols = [c for c in summary_cols if c in df.columns]
-
-    summary_df = df[available_cols].copy()
-
-    if '综合得分' in df.columns:
-        summary_df = summary_df.sort_values('综合得分', ascending=False)
-
-    summary_df.to_excel(output_path, index=False)
-    print(f"摘要报告已保存: {output_path}")
-    return output_path
-
-
-def interactive_filter(df):
-    """交互式筛选主函数"""
-    original_count = len(df)
-    current_df = df
-
-    while True:
-        print("\n" + "="*60)
-        print("中药化合物鉴定报告筛选工具 v3.0 (通用版)")
-        print("="*60)
-        print(f"当前数据: {len(current_df)} 条 (原始: {original_count})")
-        print("\n主菜单:")
-        print(" 1. 快速预设筛选 (14种预设)")
-        print(" 2. 自定义多条件筛选 (12种条件)")
-        print(" 3. 对结果排序")
-        print(" 4. 显示统计摘要")
-        print(" 5. 预览前20条")
-        print(" 6. 导出完整报告 (双Sheet)")
-        print(" 7. 导出精简摘要")
-        print(" 8. 重置(回到原始数据)")
-        print(" 9. 保存当前筛选结果")
-        print(" 0. 退出")
-
-        choice = input("\n选择操作: ").strip()
-
-        if choice == '1':
-            filtered = quick_filter_presets(df)
-            if filtered is not None:
-                print_filter_summary(filtered, original_count)
-                display_top_results(filtered)
-                current_df = filtered
-
-        elif choice == '2':
-            conditions = create_filter_conditions(df)
-            if conditions:
-                filtered = apply_filters(df, conditions)
-                if not filtered.empty:
-                    print_filter_summary(filtered, original_count)
-                    display_top_results(filtered)
-                    current_df = filtered
-                else:
-                    print("\n筛选结果为空!")
-            else:
-                print("未设置任何筛选条件")
-
-        elif choice == '3':
-            current_df = sort_results(current_df)
-            display_top_results(current_df)
-
-        elif choice == '4':
-            print_filter_summary(current_df, original_count)
-
-        elif choice == '5':
-            display_top_results(current_df)
-
-        elif choice == '6' or choice == '9':
-            save_filtered_report(current_df)
-
-        elif choice == '7':
-            export_summary_report(current_df)
-
-        elif choice == '8':
-            current_df = df
-            print(f"\n已重置，回到原始数据: {len(current_df)} 条")
-
-        elif choice == '0':
-            print("\n感谢使用，再见!")
-            break
-
-        else:
-            print("\n无效选择，请重试")
-
-
 def main():
-    """主函数"""
-    print("="*60)
-    print("中药化合物鉴定报告筛选工具 v3.0 (通用版)")
-    print("适用于所有药材的鉴定报告")
-    print("="*60)
+    st.title("🔬 中药化合物鉴定报告筛选工具")
+    st.markdown("**通用版 - 适用于所有药材的鉴定报告**")
 
-    # 自动查找报告文件
-    excel_files = find_report_files()
+    if 'df_original' not in st.session_state:
+        st.session_state.df_original = None
+    if 'df_filtered' not in st.session_state:
+        st.session_state.df_filtered = None
 
-    if excel_files:
-        print(f"\n发现 {len(excel_files)} 个报告文件:")
-        for i, f in enumerate(excel_files[:10], 1):
-            print(f"  {i}. {f}")
-        if len(excel_files) > 10:
-            print(f"  ... 共 {len(excel_files)} 个文件")
-    else:
-        print("\n当前目录未发现报告文件")
+    # 侧边栏
+    with st.sidebar:
+        st.header("📁 加载报告")
 
-    # 输入报告文件路径
-    print("\n请输入报告文件路径:")
-    print("  - 直接回车从上述列表选择")
-    print("  - 或输入完整路径")
-    print("  - 输入 'q' 退出")
+        uploaded_file = st.file_uploader(
+            "上传鉴定报告 (Excel/CSV)",
+            type=['xlsx', 'xls', 'csv']
+        )
 
-    user_input = input("\n文件路径: ").strip()
+        if uploaded_file:
+            df = load_report(uploaded_file)
+            if df is not None:
+                st.session_state.df_original = df
+                st.session_state.df_filtered = df
+                st.success(f"已加载 {len(df)} 条记录")
 
-    if user_input.lower() == 'q':
-        print("退出程序")
-        return
+        st.divider()
+        st.markdown("**或选择本地文件:**")
+        local_files = find_local_reports()
+        if local_files:
+            selected_file = st.selectbox("本地报告", ["-- 选择 --"] + local_files)
+            if selected_file != "-- 选择 --":
+                try:
+                    xlsx = pd.ExcelFile(selected_file)
+                    all_dfs = []
+                    for sheet in xlsx.sheet_names:
+                        sheet_df = pd.read_excel(xlsx, sheet_name=sheet)
+                        sheet_df['_来源Sheet'] = sheet
+                        all_dfs.append(sheet_df)
+                    df = pd.concat(all_dfs, ignore_index=True)
+                    st.session_state.df_original = df
+                    st.session_state.df_filtered = df
+                    st.success(f"已加载 {len(df)} 条记录")
+                except Exception as e:
+                    st.error(f"加载失败: {e}")
 
-    if not user_input:
-        if excel_files:
-            print(f"\n选择文件 1: {excel_files[0]}")
-            report_path = excel_files[0]
+        if st.session_state.df_original is not None:
+            st.divider()
+            st.markdown(f"**原始数据:** {len(st.session_state.df_original)} 条")
+
+    # 主界面
+    tab1, tab2, tab3 = st.tabs(["⚡ 快速筛选", "🔧 自定义筛选", "📊 统计摘要"])
+
+    with tab1:
+        st.subheader("快速预设筛选")
+        cols = st.columns(2)
+        for i, (key, (name, desc)) in enumerate(PRESETS.items()):
+            with cols[i % 2]:
+                if st.button(f"{i+1}. {name}", use_container_width=True):
+                    if st.session_state.df_original is not None:
+                        st.session_state.df_filtered = apply_preset(
+                            st.session_state.df_original.copy(), key
+                        )
+                        st.rerun()
+
+        if st.session_state.df_filtered is not None:
+            st.divider()
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("筛选结果", len(st.session_state.df_filtered))
+            with col2:
+                pct = len(st.session_state.df_filtered) / len(st.session_state.df_original) * 100
+                st.metric("保留比例", f"{pct:.1f}%")
+            with col3:
+                if '匹配碎片数' in st.session_state.df_filtered.columns:
+                    has_frag = (st.session_state.df_filtered['匹配碎片数'] > 0).sum()
+                    st.metric("有碎片", has_frag)
+
+    with tab2:
+        st.subheader("自定义多条件筛选")
+        if st.session_state.df_original is not None:
+            with st.form("custom_filter"):
+                filters = {}
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    if '评级名称' in st.session_state.df_original.columns:
+                        levels = st.session_state.df_original['评级名称'].dropna().unique().tolist()
+                        selected_levels = st.multiselect("评级", levels, default=levels)
+                        filters['levels'] = selected_levels if selected_levels else None
+
+                    ppm_min, ppm_max = st.slider("ppm范围", 0, 100, (0, 100))
+                    filters['ppm_min'] = ppm_min if ppm_min > 0 else None
+                    filters['ppm_max'] = ppm_max if ppm_max < 100 else None
+
+                    score_min = st.number_input("最低得分", 0, 100, 0)
+                    filters['score_min'] = score_min if score_min > 0 else None
+
+                with col2:
+                    frag_min = st.number_input("最少碎片数", 0, 100, 0)
+                    filters['frag_min'] = frag_min if frag_min > 0 else None
+
+                    has_frag = st.radio("碎片状态", ["不限", "有碎片", "无碎片"], horizontal=True)
+                    filters['has_fragment'] = None if has_frag == "不限" else has_frag
+
+                    include_kw = st.text_input("包含关键词 (逗号分隔)")
+                    filters['include_kw'] = [k.strip() for k in include_kw.split(',') if k.strip()] if include_kw else None
+
+                    exclude_kw = st.text_input("排除关键词 (逗号分隔)")
+                    filters['exclude_kw'] = [k.strip() for k in exclude_kw.split(',') if k.strip()] if exclude_kw else None
+
+                submitted = st.form_submit_button("应用筛选", type="primary", use_container_width=True)
+                if submitted:
+                    st.session_state.df_filtered = apply_custom_filters(
+                        st.session_state.df_original.copy(), filters
+                    )
+                    st.rerun()
         else:
-            print("未找到报告文件，请指定路径")
-            return
-    else:
-        report_path = user_input
+            st.info("请先上传或选择报告文件")
 
-    # 加载报告
-    df = load_report(report_path)
-    if df is None:
-        return
+    with tab3:
+        st.subheader("统计摘要")
+        if st.session_state.df_filtered is not None:
+            df = st.session_state.df_filtered
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("筛选结果", len(df))
+            with col2:
+                if '综合得分' in df.columns:
+                    st.metric("平均得分", f"{df['综合得分'].mean():.1f}")
+            with col3:
+                if 'ppm' in df.columns:
+                    st.metric("平均ppm", f"{df['ppm'].mean():.1f}")
+            with col4:
+                if '匹配碎片数' in df.columns:
+                    st.metric("有碎片", (df['匹配碎片数'] > 0).sum())
 
-    # 进入交互式筛选
-    interactive_filter(df)
+            st.divider()
+            if '评级名称' in df.columns:
+                st.markdown("### 评级分布")
+                st.bar_chart(df['评级名称'].value_counts())
+
+            if '化合物类型' in df.columns:
+                st.markdown("### 化合物类型 (Top 10)")
+                st.bar_chart(df['化合物类型'].value_counts().head(10))
+        else:
+            st.info("请先加载报告文件")
+
+    # 结果表格和下载
+    if st.session_state.df_filtered is not None:
+        st.divider()
+        st.subheader("📋 筛选结果")
+
+        display_cols = st.multiselect(
+            "显示列",
+            list(st.session_state.df_filtered.columns),
+            default=['序号', '化合物中文名', '分子式', 'ppm', '综合得分', '评级名称', '匹配碎片数']
+        )
+
+        if display_cols:
+            sort_col = st.selectbox("排序", ["无排序"] + display_cols)
+            sort_asc = st.checkbox("升序")
+
+            df_display = st.session_state.df_filtered[display_cols].copy()
+            if sort_col != "无排序" and sort_col in df_display.columns:
+                df_display = df_display.sort_values(sort_col, ascending=sort_asc)
+
+            st.dataframe(df_display, use_container_width=True, height=400)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                from io import BytesIO
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    with_frag = df_display[df_display['匹配碎片数'] > 0] if '匹配碎片数' in df_display.columns else pd.DataFrame()
+                    no_frag = df_display[df_display['匹配碎片数'] == 0] if '匹配碎片数' in df_display.columns else pd.DataFrame()
+                    if not with_frag.empty:
+                        with_frag.to_excel(writer, sheet_name='有碎片匹配', index=False)
+                    if not no_frag.empty:
+                        no_frag.to_excel(writer, sheet_name='无碎片匹配', index=False)
+                    elif with_frag.empty:
+                        df_display.to_excel(writer, sheet_name='筛选结果', index=False)
+
+                st.download_button(
+                    "📥 下载完整报告 (Excel)",
+                    output.getvalue(),
+                    f"筛选结果_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+
+            with col2:
+                summary_cols = ['序号', '化合物中文名', '分子式', '匹配质量数', 'ppm', '综合得分', '评级名称', '匹配碎片数']
+                available_summary = [c for c in summary_cols if c in df_display.columns]
+                summary_df = df_display[available_summary]
+                output_summary = BytesIO()
+                summary_df.to_excel(output_summary, index=False, engine='openpyxl')
+
+                st.download_button(
+                    "📥 下载精简摘要",
+                    output_summary.getvalue(),
+                    f"摘要报告_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+
+        if st.button("🔄 重置筛选", type="secondary"):
+            st.session_state.df_filtered = st.session_state.df_original
+            st.rerun()
 
 
 if __name__ == "__main__":
