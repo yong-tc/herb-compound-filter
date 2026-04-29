@@ -12,19 +12,20 @@ import base64
 from datetime import datetime
 import re
 
-# 尝试导入plotly，如果没有安装则使用备用方案
+# 尝试导入可视化库
 try:
     import plotly.express as px
     import plotly.graph_objects as go
     PLOTLY_AVAILABLE = True
 except ImportError:
     PLOTLY_AVAILABLE = False
-    # 备用：使用matplotlib
-    try:
-        import matplotlib.pyplot as plt
-        MATPLOTLIB_AVAILABLE = True
-    except ImportError:
-        MATPLOTLIB_AVAILABLE = False
+
+# 尝试导入openpyxl，如果没有则使用备用方法
+try:
+    from openpyxl import load_workbook
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
 
 # 页面配置
 st.set_page_config(
@@ -68,12 +69,6 @@ st.markdown("""
         font-size: 0.9rem;
         color: #666;
     }
-    .filter-section {
-        background-color: #f0f2f6;
-        border-radius: 10px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-    }
     .success-badge {
         background-color: #d4edda;
         color: #155724;
@@ -106,31 +101,38 @@ def init_session_state():
 
 def load_report(file_path_or_buffer):
     """
-    加载鉴定报告
-    
-    Args:
-        file_path_or_buffer: 文件路径或上传的文件对象
-    
-    Returns:
-        DataFrame: 合并后的数据
+    加载鉴定报告 - 使用多个引擎尝试
     """
     try:
-        if hasattr(file_path_or_buffer, 'name'):
-            # 处理上传的文件
-            xlsx = pd.ExcelFile(file_path_or_buffer)
-        else:
-            xlsx = pd.ExcelFile(file_path_or_buffer)
+        # 方法1: 尝试直接读取（pandas会自动选择引擎）
+        try:
+            df = pd.read_excel(file_path_or_buffer, sheet_name=None)
+            all_dfs = []
+            for sheet_name, sheet_df in df.items():
+                sheet_df['_来源Sheet'] = sheet_name
+                all_dfs.append(sheet_df)
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+        except Exception as e1:
+            # 方法2: 尝试使用calamine引擎（如果可用）
+            try:
+                df = pd.read_excel(file_path_or_buffer, sheet_name=None, engine='calamine')
+                all_dfs = []
+                for sheet_name, sheet_df in df.items():
+                    sheet_df['_来源Sheet'] = sheet_name
+                    all_dfs.append(sheet_df)
+                combined_df = pd.concat(all_dfs, ignore_index=True)
+            except Exception as e2:
+                # 方法3: 尝试只读第一个sheet
+                try:
+                    combined_df = pd.read_excel(file_path_or_buffer, sheet_name=0)
+                    combined_df['_来源Sheet'] = 'Sheet1'
+                except Exception as e3:
+                    st.error(f"无法读取文件。请确保已安装依赖: pip install openpyxl pandas")
+                    st.error(f"错误详情: {str(e3)}")
+                    return None
         
-        all_dfs = []
-        for sheet in xlsx.sheet_names:
-            df = pd.read_excel(xlsx, sheet_name=sheet)
-            df['_来源Sheet'] = sheet
-            all_dfs.append(df)
-        
-        if not all_dfs:
+        if combined_df is None or combined_df.empty:
             return None
-        
-        combined_df = pd.concat(all_dfs, ignore_index=True)
         
         # 清理数据
         combined_df = combined_df.replace([np.inf, -np.inf], np.nan)
@@ -230,6 +232,9 @@ def show_data_overview(df):
 
 def apply_filters(df, conditions):
     """应用筛选条件"""
+    if df is None or df.empty:
+        return df
+    
     filtered = df.copy()
     
     # 药材筛选
@@ -307,8 +312,8 @@ def apply_filters(df, conditions):
     return filtered
 
 
-def show_visualizations_simple(df):
-    """简单可视化（无plotly）"""
+def show_visualizations(df):
+    """显示可视化图表"""
     st.markdown("## 📊 数据统计")
     
     col1, col2 = st.columns(2)
@@ -370,85 +375,6 @@ def show_visualizations_simple(df):
                 st.markdown(f"- {t}: {count}")
 
 
-def show_visualizations_plotly(df):
-    """使用plotly的可视化"""
-    if not PLOTLY_AVAILABLE:
-        show_visualizations_simple(df)
-        return
-    
-    st.markdown("## 📊 数据分析图表")
-    
-    col1, col2 = st.columns(2)
-    
-    # 评级分布
-    with col1:
-        if '评级名称' in df.columns:
-            rating_counts = df['评级名称'].value_counts()
-            fig = px.pie(
-                values=rating_counts.values,
-                names=rating_counts.index,
-                title="化合物置信等级分布",
-                color_discrete_sequence=px.colors.sequential.Greens_r
-            )
-            st.plotly_chart(fig, use_container_width=True)
-    
-    # ppm分布
-    with col2:
-        if 'ppm' in df.columns:
-            # 过滤异常值
-            ppm_data = df[df['ppm'] <= 200]['ppm'] if len(df[df['ppm'] <= 200]) > 0 else df['ppm']
-            fig = px.histogram(
-                ppm_data, 
-                nbins=30,
-                title="ppm误差分布",
-                labels={'value': 'ppm误差', 'count': '化合物数量'},
-                color_discrete_sequence=['#2c5f2d']
-            )
-            fig.add_vline(x=20, line_dash="dash", line_color="red", 
-                         annotation_text="20ppm", annotation_position="top")
-            fig.add_vline(x=50, line_dash="dash", line_color="orange", 
-                         annotation_text="50ppm", annotation_position="top")
-            st.plotly_chart(fig, use_container_width=True)
-    
-    # 碎片匹配分布
-    if '匹配碎片数' in df.columns:
-        col3, col4 = st.columns(2)
-        with col3:
-            has_frag = (df['匹配碎片数'] > 0).sum()
-            no_frag = (df['匹配碎片数'] == 0).sum()
-            fig = px.pie(
-                values=[has_frag, no_frag],
-                names=['有碎片证据', '无碎片证据'],
-                title="碎片匹配情况",
-                color_discrete_sequence=['#97bc62', '#ffa500']
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col4:
-            if '综合得分' in df.columns:
-                fig = px.box(
-                    df, y='综合得分',
-                    title="综合得分分布",
-                    color_discrete_sequence=['#2c5f2d']
-                )
-                st.plotly_chart(fig, use_container_width=True)
-    
-    # 化合物类型分布
-    if '化合物类型' in df.columns:
-        type_counts = df['化合物类型'].value_counts().head(10)
-        if not type_counts.empty:
-            fig = px.bar(
-                x=type_counts.values,
-                y=type_counts.index,
-                orientation='h',
-                title="Top 10 化合物类型",
-                labels={'x': '化合物数量', 'y': '类型'},
-                color_discrete_sequence=['#2c5f2d']
-            )
-            fig.update_layout(height=400)
-            st.plotly_chart(fig, use_container_width=True)
-
-
 def show_results_table(df):
     """显示结果表格"""
     st.markdown("## 📋 筛选结果")
@@ -487,8 +413,8 @@ def show_results_table(df):
     available_cols = [c for c in default_cols if c in df.columns]
     
     if not available_cols:
-        # 如果没有标准列，显示所有列
-        available_cols = df.columns.tolist()
+        # 如果没有标准列，显示所有列（排除内部列）
+        available_cols = [c for c in df.columns if not c.startswith('_')]
     
     # 使用st.dataframe显示
     st.dataframe(
@@ -507,28 +433,42 @@ def show_results_table(df):
 
 
 def export_to_excel(df):
-    """导出到Excel"""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        if '匹配碎片数' in df.columns:
-            with_frag = df[df['匹配碎片数'] > 0]
-            no_frag = df[df['匹配碎片数'] == 0]
-            if not with_frag.empty:
-                with_frag.to_excel(writer, sheet_name='有碎片匹配', index=False)
-            if not no_frag.empty:
-                no_frag.to_excel(writer, sheet_name='无碎片匹配', index=False)
-        else:
-            df.to_excel(writer, sheet_name='筛选结果', index=False)
-    
-    output.seek(0)
-    return output.getvalue()
+    """导出到Excel - 使用csv备用方法"""
+    try:
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            if '匹配碎片数' in df.columns:
+                with_frag = df[df['匹配碎片数'] > 0]
+                no_frag = df[df['匹配碎片数'] == 0]
+                if not with_frag.empty:
+                    with_frag.to_excel(writer, sheet_name='有碎片匹配', index=False)
+                if not no_frag.empty:
+                    no_frag.to_excel(writer, sheet_name='无碎片匹配', index=False)
+            else:
+                df.to_excel(writer, sheet_name='筛选结果', index=False)
+        
+        output.seek(0)
+        return output.getvalue()
+    except Exception as e:
+        # 如果Excel导出失败，尝试CSV
+        st.warning("Excel导出失败，使用CSV格式")
+        csv_data = df.to_csv(index=False).encode('utf-8-sig')
+        return csv_data
 
 
 def download_button(df, filename):
     """导出下载按钮"""
     excel_data = export_to_excel(df)
+    
+    # 检测文件类型
+    if filename.endswith('.xlsx'):
+        mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        mime_type = "text/csv"
+        filename = filename.replace('.xlsx', '.csv')
+    
     b64 = base64.b64encode(excel_data).decode()
-    href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="{filename}">📥 下载Excel文件</a>'
+    href = f'<a href="data:{mime_type};base64,{b64}" download="{filename}">📥 下载文件</a>'
     st.markdown(href, unsafe_allow_html=True)
 
 
@@ -571,9 +511,9 @@ def show_filter_sidebar(df):
                 df = df[df['ppm'] <= 30]
             
             keywords = {
-                "仅黄酮类": ['黄酮', '黄酮醇', '黄烷酮'],
-                "仅生物碱": ['生物碱', '碱'],
-                "仅萜类": ['萜', '萜类', 'terpene']
+                "仅黄酮类": ['黄酮', '黄酮醇', '黄烷酮', 'flavonoid'],
+                "仅生物碱": ['生物碱', '碱', 'alkaloid'],
+                "仅萜类": ['萜', '萜类', 'terpene', 'terpenoid']
             }[preset]
             
             name_cols = []
@@ -581,6 +521,8 @@ def show_filter_sidebar(df):
                 name_cols.append('化合物中文名')
             if '化合物类型' in df.columns:
                 name_cols.append('化合物类型')
+            if '化合物英文名' in df.columns:
+                name_cols.append('化合物英文名')
             
             if name_cols:
                 mask = pd.Series([False] * len(df))
@@ -614,12 +556,12 @@ def show_filter_sidebar(df):
     
     # ppm范围
     if 'ppm' in df.columns:
-        min_val = float(df['ppm'].min())
-        max_val = float(df['ppm'].max())
+        min_val = 0.0
+        max_val = min(float(df['ppm'].max()), 200.0)
         ppm_range = st.sidebar.slider(
             "ppm误差范围",
             min_value=0.0,
-            max_value=min(max_val, 200.0),
+            max_value=max_val,
             value=(0.0, min(max_val, 100.0))
         )
         conditions['ppm_range'] = ppm_range
@@ -695,6 +637,10 @@ def main():
     </div>
     """, unsafe_allow_html=True)
     
+    # 显示依赖状态
+    if not OPENPYXL_AVAILABLE:
+        st.warning("⚠️ openpyxl未安装，将使用备用方法读取文件。如需完整功能，请运行: pip install openpyxl")
+    
     # 文件上传区域
     with st.expander("📂 加载报告文件", expanded=st.session_state.data is None):
         uploaded_file = st.file_uploader(
@@ -712,6 +658,10 @@ def main():
                     st.session_state.filtered_data = df.copy()
                     st.session_state.herb_names = extract_herb_names(df)
                     st.success(f"✅ 成功加载 {len(df)} 条记录，包含 {len(st.session_state.herb_names)} 种药材")
+                    
+                    # 显示列名预览
+                    with st.expander("查看数据列"):
+                        st.write("数据列:", df.columns.tolist())
                 else:
                     st.error("文件加载失败，请检查文件格式")
     
@@ -727,10 +677,6 @@ def main():
             if st.button("🔄 重置所有筛选", use_container_width=True):
                 st.session_state.filtered_data = st.session_state.original_data.copy()
                 st.rerun()
-        with col3:
-            export_col, _ = st.columns(2)
-            with export_col:
-                pass
         
         # 数据概览
         show_data_overview(st.session_state.filtered_data)
@@ -744,10 +690,7 @@ def main():
             st.info(f"🔍 筛选完成: 找到 {len(filtered_df)} 个符合条件的化合物")
             
             # 可视化图表
-            if PLOTLY_AVAILABLE:
-                show_visualizations_plotly(filtered_df)
-            else:
-                show_visualizations_simple(filtered_df)
+            show_visualizations(filtered_df)
             
             # 结果显示
             result_df = show_results_table(filtered_df)
@@ -758,22 +701,6 @@ def main():
             download_button(result_df, filename)
         else:
             st.warning("⚠️ 没有找到符合条件的化合物，请调整筛选条件")
-        
-        # 详情查看
-        with st.expander("📖 查看化合物详情"):
-            if filtered_df is not None and not filtered_df.empty:
-                compound_col = '化合物中文名' if '化合物中文名' in filtered_df.columns else filtered_df.columns[0]
-                selected_compound = st.selectbox(
-                    "选择化合物查看详情",
-                    filtered_df[compound_col].tolist()
-                )
-                if selected_compound:
-                    details = filtered_df[filtered_df[compound_col] == selected_compound].iloc[0]
-                    # 显示详情
-                    for col in filtered_df.columns:
-                        val = details[col]
-                        if pd.notna(val) and str(val).strip():
-                            st.markdown(f"**{col}:** {val}")
     
     else:
         # 空状态提示
@@ -793,19 +720,7 @@ def main():
                 - 化合物类型
                 - 药材名称（可选）
             
-            ### 筛选功能
-            - **快速预设**: 一键应用常用筛选组合
-            - **多条件筛选**: 支持药材、等级、ppm、得分等多维度筛选
-            - **关键词搜索**: 按化合物名称或类型筛选
-            - **可视化分析**: 自动生成数据分布图表
-            - **结果导出**: 支持Excel格式导出
-            
-            ### 常见问题
-            1. 如果图表不显示，请安装 plotly: `pip install plotly`
-            2. 确保Excel文件包含必要的列
-            3. 支持多个工作表的文件
-            """)
-
-
-if __name__ == "__main__":
-    main()
+            ### 如何安装依赖
+            在本地运行时，请确保安装以下包：
+            ```bash
+            pip install streamlit pandas openpyxl numpy
