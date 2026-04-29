@@ -20,7 +20,7 @@ try:
 except ImportError:
     PLOTLY_AVAILABLE = False
 
-# 尝试导入openpyxl，如果没有则使用备用方法
+# 尝试导入openpyxl
 try:
     from openpyxl import load_workbook
     OPENPYXL_AVAILABLE = True
@@ -69,20 +69,6 @@ st.markdown("""
         font-size: 0.9rem;
         color: #666;
     }
-    .success-badge {
-        background-color: #d4edda;
-        color: #155724;
-        padding: 0.2rem 0.5rem;
-        border-radius: 5px;
-        font-size: 0.8rem;
-    }
-    .warning-badge {
-        background-color: #fff3cd;
-        color: #856404;
-        padding: 0.2rem 0.5rem;
-        border-radius: 5px;
-        font-size: 0.8rem;
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -100,36 +86,15 @@ def init_session_state():
 
 
 def load_report(file_path_or_buffer):
-    """
-    加载鉴定报告 - 使用多个引擎尝试
-    """
+    """加载鉴定报告"""
     try:
-        # 方法1: 尝试直接读取（pandas会自动选择引擎）
-        try:
-            df = pd.read_excel(file_path_or_buffer, sheet_name=None)
-            all_dfs = []
-            for sheet_name, sheet_df in df.items():
-                sheet_df['_来源Sheet'] = sheet_name
-                all_dfs.append(sheet_df)
-            combined_df = pd.concat(all_dfs, ignore_index=True)
-        except Exception as e1:
-            # 方法2: 尝试使用calamine引擎（如果可用）
-            try:
-                df = pd.read_excel(file_path_or_buffer, sheet_name=None, engine='calamine')
-                all_dfs = []
-                for sheet_name, sheet_df in df.items():
-                    sheet_df['_来源Sheet'] = sheet_name
-                    all_dfs.append(sheet_df)
-                combined_df = pd.concat(all_dfs, ignore_index=True)
-            except Exception as e2:
-                # 方法3: 尝试只读第一个sheet
-                try:
-                    combined_df = pd.read_excel(file_path_or_buffer, sheet_name=0)
-                    combined_df['_来源Sheet'] = 'Sheet1'
-                except Exception as e3:
-                    st.error(f"无法读取文件。请确保已安装依赖: pip install openpyxl pandas")
-                    st.error(f"错误详情: {str(e3)}")
-                    return None
+        # 尝试直接读取
+        df = pd.read_excel(file_path_or_buffer, sheet_name=None)
+        all_dfs = []
+        for sheet_name, sheet_df in df.items():
+            sheet_df['_来源Sheet'] = sheet_name
+            all_dfs.append(sheet_df)
+        combined_df = pd.concat(all_dfs, ignore_index=True)
         
         if combined_df is None or combined_df.empty:
             return None
@@ -340,14 +305,14 @@ def show_visualizations(df):
             # ppm区间分布
             bins = [0, 5, 10, 20, 30, 50, 100, float('inf')]
             labels = ['0-5', '5-10', '10-20', '20-30', '30-50', '50-100', '>100']
-            df['_ppm_bin'] = pd.cut(df['ppm'], bins=bins, labels=labels)
+            df_copy = df.copy()
+            df_copy['_ppm_bin'] = pd.cut(df_copy['ppm'], bins=bins, labels=labels)
             st.markdown("**ppm区间分布**")
             for label in labels:
-                count = (df['_ppm_bin'] == label).sum()
+                count = (df_copy['_ppm_bin'] == label).sum()
                 if count > 0:
                     pct = count / len(df) * 100
                     st.markdown(f"- {label}: {count} ({pct:.1f}%)")
-            df.drop('_ppm_bin', axis=1, inplace=True)
     
     # 碎片匹配
     if '匹配碎片数' in df.columns:
@@ -413,27 +378,21 @@ def show_results_table(df):
     available_cols = [c for c in default_cols if c in df.columns]
     
     if not available_cols:
-        # 如果没有标准列，显示所有列（排除内部列）
+        # 如果没有标准列，显示所有列
         available_cols = [c for c in df.columns if not c.startswith('_')]
     
     # 使用st.dataframe显示
     st.dataframe(
         df[available_cols],
         use_container_width=True,
-        height=500,
-        column_config={
-            "序号": st.column_config.NumberColumn("序号", width="small"),
-            "ppm": st.column_config.NumberColumn("ppm", format="%.2f", width="small"),
-            "综合得分": st.column_config.NumberColumn("综合得分", format="%.1f", width="small"),
-            "匹配碎片数": st.column_config.NumberColumn("碎片数", width="small")
-        }
+        height=500
     )
     
     return df
 
 
 def export_to_excel(df):
-    """导出到Excel - 使用csv备用方法"""
+    """导出到Excel"""
     try:
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -451,7 +410,6 @@ def export_to_excel(df):
         return output.getvalue()
     except Exception as e:
         # 如果Excel导出失败，尝试CSV
-        st.warning("Excel导出失败，使用CSV格式")
         csv_data = df.to_csv(index=False).encode('utf-8-sig')
         return csv_data
 
@@ -459,16 +417,8 @@ def export_to_excel(df):
 def download_button(df, filename):
     """导出下载按钮"""
     excel_data = export_to_excel(df)
-    
-    # 检测文件类型
-    if filename.endswith('.xlsx'):
-        mime_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    else:
-        mime_type = "text/csv"
-        filename = filename.replace('.xlsx', '.csv')
-    
     b64 = base64.b64encode(excel_data).decode()
-    href = f'<a href="data:{mime_type};base64,{b64}" download="{filename}">📥 下载文件</a>'
+    href = f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">📥 下载文件</a>'
     st.markdown(href, unsafe_allow_html=True)
 
 
@@ -486,29 +436,30 @@ def show_filter_sidebar(df):
     )
     
     if preset != "无":
+        result_df = df.copy()
         if preset == "高置信模式":
-            if '评级名称' in df.columns:
-                df = df[df['评级名称'].isin(['确证级', '高置信级'])]
-            if 'ppm' in df.columns:
-                df = df[df['ppm'] <= 20]
-            if '匹配碎片数' in df.columns:
-                df = df[df['匹配碎片数'] > 0]
+            if '评级名称' in result_df.columns:
+                result_df = result_df[result_df['评级名称'].isin(['确证级', '高置信级'])]
+            if 'ppm' in result_df.columns:
+                result_df = result_df[result_df['ppm'] <= 20]
+            if '匹配碎片数' in result_df.columns:
+                result_df = result_df[result_df['匹配碎片数'] > 0]
         elif preset == "中等置信模式":
-            if '评级名称' in df.columns:
-                df = df[df['评级名称'].isin(['确证级', '高置信级', '推定级'])]
-            if 'ppm' in df.columns:
-                df = df[df['ppm'] <= 50]
+            if '评级名称' in result_df.columns:
+                result_df = result_df[result_df['评级名称'].isin(['确证级', '高置信级', '推定级'])]
+            if 'ppm' in result_df.columns:
+                result_df = result_df[result_df['ppm'] <= 50]
         elif preset == "宽松模式":
-            if 'ppm' in df.columns:
-                df = df[df['ppm'] <= 100]
-            if '匹配碎片数' in df.columns:
-                df = df[df['匹配碎片数'] > 0]
+            if 'ppm' in result_df.columns:
+                result_df = result_df[result_df['ppm'] <= 100]
+            if '匹配碎片数' in result_df.columns:
+                result_df = result_df[result_df['匹配碎片数'] > 0]
         elif preset == "确证级":
-            if '评级名称' in df.columns:
-                df = df[df['评级名称'] == '确证级']
+            if '评级名称' in result_df.columns:
+                result_df = result_df[result_df['评级名称'] == '确证级']
         elif preset in ["仅黄酮类", "仅生物碱", "仅萜类"]:
-            if 'ppm' in df.columns:
-                df = df[df['ppm'] <= 30]
+            if 'ppm' in result_df.columns:
+                result_df = result_df[result_df['ppm'] <= 30]
             
             keywords = {
                 "仅黄酮类": ['黄酮', '黄酮醇', '黄烷酮', 'flavonoid'],
@@ -517,22 +468,22 @@ def show_filter_sidebar(df):
             }[preset]
             
             name_cols = []
-            if '化合物中文名' in df.columns:
+            if '化合物中文名' in result_df.columns:
                 name_cols.append('化合物中文名')
-            if '化合物类型' in df.columns:
+            if '化合物类型' in result_df.columns:
                 name_cols.append('化合物类型')
-            if '化合物英文名' in df.columns:
+            if '化合物英文名' in result_df.columns:
                 name_cols.append('化合物英文名')
             
             if name_cols:
-                mask = pd.Series([False] * len(df))
+                mask = pd.Series([False] * len(result_df))
                 for kw in keywords:
                     for col in name_cols:
-                        mask = mask | df[col].str.contains(kw, na=False, case=False)
-                df = df[mask]
+                        mask = mask | result_df[col].str.contains(kw, na=False, case=False)
+                result_df = result_df[mask]
         
         st.sidebar.success(f"已应用: {preset}")
-        return df
+        return result_df
     
     st.sidebar.markdown("---")
     st.sidebar.markdown("## 基础筛选")
@@ -556,7 +507,6 @@ def show_filter_sidebar(df):
     
     # ppm范围
     if 'ppm' in df.columns:
-        min_val = 0.0
         max_val = min(float(df['ppm'].max()), 200.0)
         ppm_range = st.sidebar.slider(
             "ppm误差范围",
@@ -637,10 +587,6 @@ def main():
     </div>
     """, unsafe_allow_html=True)
     
-    # 显示依赖状态
-    if not OPENPYXL_AVAILABLE:
-        st.warning("⚠️ openpyxl未安装，将使用备用方法读取文件。如需完整功能，请运行: pip install openpyxl")
-    
     # 文件上传区域
     with st.expander("📂 加载报告文件", expanded=st.session_state.data is None):
         uploaded_file = st.file_uploader(
@@ -657,11 +603,7 @@ def main():
                     st.session_state.original_data = df.copy()
                     st.session_state.filtered_data = df.copy()
                     st.session_state.herb_names = extract_herb_names(df)
-                    st.success(f"✅ 成功加载 {len(df)} 条记录，包含 {len(st.session_state.herb_names)} 种药材")
-                    
-                    # 显示列名预览
-                    with st.expander("查看数据列"):
-                        st.write("数据列:", df.columns.tolist())
+                    st.success(f"成功加载 {len(df)} 条记录，包含 {len(st.session_state.herb_names)} 种药材")
                 else:
                     st.error("文件加载失败，请检查文件格式")
     
@@ -670,7 +612,7 @@ def main():
         df = st.session_state.data
         
         # 工具栏
-        col1, col2, col3 = st.columns([2, 1, 1])
+        col1, col2 = st.columns([3, 1])
         with col1:
             st.markdown(f"**当前数据:** {len(st.session_state.filtered_data)} / {len(df)} 条记录")
         with col2:
@@ -687,7 +629,7 @@ def main():
         
         if filtered_df is not None and not filtered_df.empty:
             # 显示筛选结果统计
-            st.info(f"🔍 筛选完成: 找到 {len(filtered_df)} 个符合条件的化合物")
+            st.info(f"筛选完成: 找到 {len(filtered_df)} 个符合条件的化合物")
             
             # 可视化图表
             show_visualizations(filtered_df)
@@ -700,14 +642,14 @@ def main():
             filename = f"筛选结果_{timestamp}.xlsx"
             download_button(result_df, filename)
         else:
-            st.warning("⚠️ 没有找到符合条件的化合物，请调整筛选条件")
+            st.warning("没有找到符合条件的化合物，请调整筛选条件")
     
     else:
         # 空状态提示
-        st.info("👈 请先上传鉴定报告文件开始分析")
+        st.info("请先上传鉴定报告文件开始分析")
         
         # 使用说明
-        with st.expander("📖 使用说明"):
+        with st.expander("使用说明"):
             st.markdown("""
             ### 支持的报告格式
             - 支持所有中药的化合物鉴定报告
@@ -720,7 +662,14 @@ def main():
                 - 化合物类型
                 - 药材名称（可选）
             
-            ### 如何安装依赖
-            在本地运行时，请确保安装以下包：
-            ```bash
-            pip install streamlit pandas openpyxl numpy
+            ### 筛选功能
+            - **快速预设**: 一键应用常用筛选组合
+            - **多条件筛选**: 支持药材、等级、ppm、得分等多维度筛选
+            - **关键词搜索**: 按化合物名称或类型筛选
+            - **可视化分析**: 自动生成数据分布图表
+            - **结果导出**: 支持Excel格式导出
+            """)
+
+
+if __name__ == "__main__":
+    main()
